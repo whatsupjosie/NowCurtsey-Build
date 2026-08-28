@@ -1,0 +1,126 @@
+--- bundle/PubPartner_Continuity_Bundle_2026-08-16/01_CANONICAL_CURRENT/PubPartner_Federation_v0_2/pubpartner_federation/engine.py	2026-08-16 19:26:59.000000000 +0000
++++ tree/pubpartner/pubpartner_federation/engine.py	2026-08-17 00:37:57.115779534 +0000
+@@ -15,15 +15,32 @@
+ class SyncEngine:
+     """Offline-first bidirectional sync with patch changes and vector clocks."""
+     PROTOCOL="pubpartner-sync/0.1"
+-    def __init__(self,node_id:str,store:SyncStore):
++    # Fields that carry per-commit provenance rather than authored content.
++    # They change on every write by definition, so treating them as
++    # conflict-bearing made every genuinely concurrent edit collide on
++    # bookkeeping even when the authored fields merged cleanly. They are
++    # resolved as last-writer-wins registers instead, using a total order both
++    # replicas compute identically.
++    DEFAULT_LWW_FIELDS={"manuscript":frozenset({"message_id","timestamp"})}
++
++    def __init__(self,node_id:str,store:SyncStore,lww_fields:Optional[Dict[str,frozenset]]=None):
+         if not node_id.strip(): raise ValueError("node_id must not be empty")
+-        self.node_id=node_id; self.store=store; self.clock=VectorClock()
++        self.node_id=node_id; self.store=store
++        self.lww_fields=dict(self.DEFAULT_LWW_FIELDS if lww_fields is None else lww_fields)
++        # Recovered from disk, not reset. See SyncStore.load_clock.
++        self.clock=store.load_clock()
++
++    def _advance(self,clock:VectorClock)->None:
++        self.clock=clock; self.store.save_clock(clock)
++
++    def _lww(self,entity_type:str)->frozenset:
++        return self.lww_fields.get(entity_type,frozenset())
+ 
+     def upsert(self,entity_type:str,entity_id:str,fields:Dict[str,Any])->Change:
+         with self.store.lock:
+             current=self.store.get(entity_type,entity_id)
+             base=current.version if current else VectorClock()
+-            self.clock=self.clock.merge(base).increment(self.node_id)
++            self._advance(self.clock.merge(base).increment(self.node_id))
+             merged=dict(current.fields) if current and not current.deleted else {}
+             merged.update(fields)
+             entity=Entity(entity_type,entity_id,merged,self.clock,False)
+@@ -36,7 +53,7 @@
+         with self.store.lock:
+             current=self.store.get(entity_type,entity_id)
+             base=current.version if current else VectorClock()
+-            self.clock=self.clock.merge(base).increment(self.node_id)
++            self._advance(self.clock.merge(base).increment(self.node_id))
+             entity=Entity(entity_type,entity_id,{},self.clock,True)
+             self.store.put(entity)
+             change=self._change(entity,base,{},True)
+@@ -48,18 +65,38 @@
+             if self.store.has_change(change.change_id): return ApplyResult(False,duplicate=True)
+             remote=change
+             local=self.store.get(change.entity_type,change.entity_id)
+-            self.clock=self.clock.merge(change.version)
++            self._advance(self.clock.merge(change.version))
+     
+             if local is None:
+                 entity=remote_to_entity(remote)
+-                self.store.put(entity); self.store.mark_change(change.change_id)
++                # Record field versions on creation too. Omitting them left
++                # every field of a remotely-created entity at version {}, which
++                # can never strictly dominate a later remote patch's base — so a
++                # second node's concurrent creation of the same entity id
++                # overwrote the first author's content with no conflict
++                # recorded. That is silent data loss under section 21.
++                self.store.put(entity, changed_fields=remote.fields.keys())
++                self.store.mark_change(change.change_id)
+                 return ApplyResult(True)
+     
+             if local.version.dominates(remote.version):
+                 self.store.mark_change(change.change_id); return ApplyResult(False,ignored=True)
+     
+             if remote.version.dominates(local.version):
+-                self.store.put(remote_to_entity(remote), changed_fields=remote.fields.keys()); self.store.mark_change(change.change_id)
++                # A change carries a PATCH, not a whole entity. Replacing the
++                # stored fields with remote_to_entity(remote) therefore deleted
++                # every field the patch did not mention. This was harmless only
++                # while every commit submitted the complete manuscript; once
++                # commits became real deltas, a peer editing one field wiped the
++                # other six on every replica that received it. Merge instead.
++                if remote.deleted:
++                    self.store.put(Entity(local.entity_type,local.entity_id,{},remote.version,True))
++                else:
++                    merged={} if local.deleted else dict(local.fields)
++                    merged.update(remote.fields)
++                    self.store.put(Entity(local.entity_type,local.entity_id,merged,remote.version,False),
++                                   changed_fields=remote.fields.keys())
++                self.store.mark_change(change.change_id)
+                 return ApplyResult(True)
+     
+             # Concurrent: compare only fields actually changed by the remote patch.
+@@ -75,8 +112,10 @@
+                 self.store.mark_change(change.change_id)
+                 return ApplyResult(False,conflict=Conflict(local.entity_type,local.entity_id,local,remote_to_entity(remote),reason))
+     
++            lww=self._lww(local.entity_type)
+             conflicts=[]
+             for key,remote_value in remote.fields.items():
++                if key in lww: continue
+                 local_field_version=self.store.field_version(local.entity_type,local.entity_id,key)
+                 if local_field_version.strictly_dominates(remote.base_version):
+                     if local.fields.get(key) != remote_value:
+@@ -92,6 +131,13 @@
+             applied_fields=[]
+             for key,value in remote.fields.items():
+                 local_field_version=self.store.field_version(local.entity_type,local.entity_id,key)
++                if key in lww:
++                    # Both replicas compare the same pair of clocks with the
++                    # same total order, so both pick the same winner.
++                    if _register_order(remote.version) > _register_order(local_field_version):
++                        merged[key]=value
++                        applied_fields.append(key)
++                    continue
+                 if not local_field_version.strictly_dominates(remote.base_version):
+                     merged[key]=value
+                     applied_fields.append(key)
+@@ -117,5 +163,11 @@
+         digest=hashlib.sha256(json.dumps(material,ensure_ascii=False,sort_keys=True,separators=(",",":")).encode()).hexdigest()
+         return Change(digest,self.node_id,entity.entity_type,entity.entity_id,dict(patch),entity.version,base,deleted)
+ 
++def _register_order(clock:VectorClock)->tuple[int,str]:
++    """Total order over vector clocks, used only to settle LWW registers."""
++    values=clock.to_dict()
++    return (sum(values.values()), json.dumps(values,sort_keys=True,separators=(",",":")))
++
++
+ def remote_to_entity(change:Change)->Entity:
+     return Entity(change.entity_type,change.entity_id,dict(change.fields),change.version,change.deleted)
