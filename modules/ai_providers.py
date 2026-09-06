@@ -154,6 +154,78 @@ class OpenAIProvider:
         )
 
 
+class AnthropicProvider:
+    """
+    Claude via the Anthropic Messages API.
+
+    Uses raw httpx rather than the `anthropic` SDK — no extra hard dependency,
+    and the request shape is simple enough that the SDK buys nothing here.
+    Mirrors the request format already proven in bot_llm_adapter.py's
+    AnthropicBotAdapter (streaming); this is the non-streaming counterpart
+    the universal provider registry needs.
+    """
+
+    backend = "anthropic"
+    _API_URL = "https://api.anthropic.com/v1/messages"
+    _DEFAULT_MODEL = "claude-haiku-4-5-20251001"
+
+    async def healthcheck(self, profile: AIProfile) -> Dict[str, Any]:
+        api_key = os.getenv(profile.api_key_env, "").strip()
+        return {
+            "ok": bool(api_key),
+            "backend": self.backend,
+            "api_key_env": profile.api_key_env,
+            "detail": "Configured" if api_key else "Missing API key env var.",
+        }
+
+    async def generate(self, profile: AIProfile, request: GenerateRequest) -> GenerateResult:
+        api_key = os.getenv(profile.api_key_env, "").strip()
+        if not api_key:
+            raise AIProviderError(
+                f"Anthropic profile '{profile.name}' requires env var '{profile.api_key_env}' to be set."
+            )
+        model = profile.model or self._DEFAULT_MODEL
+        body: Dict[str, Any] = {
+            "model": model,
+            "max_tokens": int(request.options.get("max_tokens", 256)),
+            "temperature": float(request.options.get("temperature", 0.7)),
+            "messages": [{"role": "user", "content": request.prompt}],
+            "stream": False,
+        }
+        if request.system:
+            body["system"] = request.system
+
+        timeout_seconds = float(request.options.get("timeout_seconds", request.options.get("timeout", 60.0)))
+        async with httpx.AsyncClient(timeout=timeout_seconds) as client:
+            response = await client.post(
+                self._API_URL,
+                headers={
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json=body,
+            )
+            if response.status_code != 200:
+                raise AIProviderError(
+                    f"Anthropic API returned {response.status_code}: {response.text[:300]}"
+                )
+            data = response.json()
+
+        parts = [
+            block.get("text", "")
+            for block in data.get("content", [])
+            if block.get("type") == "text"
+        ]
+        return GenerateResult(
+            text="".join(parts).strip(),
+            provider=profile.name,
+            backend=self.backend,
+            model=model,
+            meta={"stop_reason": data.get("stop_reason"), "usage": data.get("usage")},
+        )
+
+
 class GeminiProvider:
     backend = "gemini"
 
@@ -267,6 +339,7 @@ PROVIDER_REGISTRY: Dict[str, TextProvider] = {
     "echo": EchoProvider(),
     "ollama": OllamaProvider(),
     "openai": OpenAIProvider(),
+    "anthropic": AnthropicProvider(),
     "gemini": GeminiProvider(),
     "local_gguf": LocalGGUFProvider(),
 }

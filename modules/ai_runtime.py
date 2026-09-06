@@ -113,6 +113,30 @@ def _default_payload() -> Dict[str, Any]:
                 "capabilities": {"chat": True, "tts": False},
                 "runtime_options": {"temperature": 0.65, "max_tokens": 320},
             },
+            "claude_haiku": {
+                "backend": "anthropic",
+                "model": "claude-haiku-4-5-20251001",
+                "api_key_env": "PUBCAST_ANTHROPIC_KEY",
+                "enabled": False,
+                "capabilities": {"chat": True, "tts": False},
+                "runtime_options": {"temperature": 0.7, "max_tokens": 256},
+            },
+            "openai_gpt4o_mini": {
+                "backend": "openai",
+                "model": "gpt-4o-mini",
+                "api_key_env": "PUBCAST_OPENAI_KEY",
+                "enabled": False,
+                "capabilities": {"chat": True, "tts": False},
+                "runtime_options": {"temperature": 0.7, "max_tokens": 256},
+            },
+            "gemini_flash": {
+                "backend": "gemini",
+                "model": "gemini-1.5-flash",
+                "api_key_env": "PUBCAST_GOOGLE_KEY",
+                "enabled": False,
+                "capabilities": {"chat": True, "tts": False},
+                "runtime_options": {"temperature": 0.7, "max_tokens": 256},
+            },
             "local_gguf_http": {
                 "backend": "local_gguf",
                 "model": "gemma-gguf",
@@ -221,7 +245,7 @@ def validate_ai_runtime_config(config: AIRuntimeConfig) -> AIRuntimeConfig:
         raise AIRuntimeConfigError(
             f"Active AI profile '{active.name}' requires an endpoint in {config.config_path}."
         )
-    if active.backend in {"openai", "gemini"} and not active.api_key_env:
+    if active.backend in {"openai", "anthropic", "gemini"} and not active.api_key_env:
         raise AIRuntimeConfigError(
             f"Active AI profile '{active.name}' requires an api_key_env in {config.config_path}."
         )

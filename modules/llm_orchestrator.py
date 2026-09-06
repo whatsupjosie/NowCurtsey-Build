@@ -58,6 +58,14 @@ Environment Variables
   ARCHITECT_TIMEOUT_S       Max seconds to wait for Architect (default: 12)
   BREAKER_THRESHOLD         Failures before breaker opens (default: 3)
   BREAKER_COOLDOWN_S        Seconds breaker stays open (default: 60)
+  PUBCAST_PRIMARY_AI_PROFILE   Name of an ai_runtime.json profile (config/ai_runtime.json)
+                            to use as Studio's brain instead of the hardcoded local
+                            Ollama call. Any backend registered in
+                            ai_providers.PROVIDER_REGISTRY works here — ollama,
+                            openai, anthropic (Claude), gemini, local_gguf, or any
+                            backend added to the registry later. Unset by default,
+                            so existing deployments keep their exact current
+                            behavior (local Ollama Studio) unless this is set.
 
 Rear View Foresight LLC — Feic Mo Chroí — 2026
 """
@@ -82,9 +90,31 @@ try:
 except Exception:  # pragma: no cover - optional during partial builds
     settings = None  # type: ignore
 
+# Universal AI provider registry (ai_runtime.py + ai_providers.py). Optional:
+# Studio keeps its original hardcoded-Ollama behavior unless PUBCAST_PRIMARY_AI_PROFILE
+# names a profile, in which case Studio is answered by whatever backend that
+# profile points at — ollama, openai, anthropic, gemini, local_gguf, or any
+# backend later added to ai_providers.PROVIDER_REGISTRY.
+try:
+    from .ai_runtime import load_ai_runtime_config, AIRuntimeConfigError
+    from .ai_providers import generate_with_profile, AIProviderError
+    _HAS_UNIVERSAL_AI = True
+except Exception:  # pragma: no cover - optional during partial builds
+    load_ai_runtime_config = None  # type: ignore
+    AIRuntimeConfigError = Exception  # type: ignore
+    generate_with_profile = None  # type: ignore
+    AIProviderError = Exception  # type: ignore
+    _HAS_UNIVERSAL_AI = False
+
 logger = logging.getLogger("pubcast.orchestrator")
 
 # ── Environment —
+
+# Name of an ai_runtime.json profile to use as Studio's brain instead of the
+# hardcoded local Ollama call below. Any backend in PROVIDER_REGISTRY can be
+# named here (ollama, openai, anthropic, gemini, local_gguf) — this is the
+# single switch that lets any LLM, local or cloud, step in as the primary AI.
+_PRIMARY_AI_PROFILE = os.getenv("PUBCAST_PRIMARY_AI_PROFILE", "").strip()
 
 _OLLAMA_HOST    = os.getenv("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
 _STUDIO_MODEL   = os.getenv("STUDIO_MODEL", os.getenv("OLLAMA_MODEL", getattr(settings, "studio_model", "ministral-pubcast:3b")))
@@ -390,19 +420,43 @@ class LLMOrchestrator:
     async def startup(self) -> None:
         """Probe both minds. App boots regardless of Architect availability."""
         self._refresh_policy()
-        # Studio probe
-        try:
-            async with httpx.AsyncClient(timeout=5.0) as c:
-                r = await c.get(_OLLAMA_HOST)
-                self._studio_ok = r.status_code == 200
-        except Exception:
-            self._studio_ok = False
 
-        logger.info(
-            "Orchestrator: Studio — %s  (model: %s)",
-            "ONLINE" if self._studio_ok else "OFFLINE (Ollama not running)",
-            self._studio_model,
-        )
+        if _PRIMARY_AI_PROFILE and _HAS_UNIVERSAL_AI:
+            # Studio's brain is a universal-registry profile, not local Ollama —
+            # probe that profile's own backend instead of pinging Ollama, which
+            # would misreport "OFFLINE" for a perfectly healthy cloud provider.
+            try:
+                config = load_ai_runtime_config()
+                profile = config.profiles.get(_PRIMARY_AI_PROFILE)
+                if profile is None or not profile.enabled:
+                    self._studio_ok = False
+                else:
+                    from .ai_providers import get_provider
+                    health = await get_provider(profile.backend).healthcheck(profile)
+                    self._studio_ok = bool(health.get("ok"))
+            except Exception as exc:
+                self._studio_ok = False
+                logger.warning("Orchestrator: universal Studio probe failed: %s", exc)
+
+            logger.info(
+                "Orchestrator: Studio — %s  (profile: %s)",
+                "ONLINE" if self._studio_ok else "OFFLINE/MISCONFIGURED",
+                _PRIMARY_AI_PROFILE,
+            )
+        else:
+            # Studio probe
+            try:
+                async with httpx.AsyncClient(timeout=5.0) as c:
+                    r = await c.get(_OLLAMA_HOST)
+                    self._studio_ok = r.status_code == 200
+            except Exception:
+                self._studio_ok = False
+
+            logger.info(
+                "Orchestrator: Studio — %s  (model: %s)",
+                "ONLINE" if self._studio_ok else "OFFLINE (Ollama not running)",
+                self._studio_model,
+            )
 
         # Architect probe — lazy load, don't block boot
         self._arch_ok = _load_architect()
@@ -413,7 +467,9 @@ class LLMOrchestrator:
         )
 
         # Warm up Studio in the background so cold model load never blocks PubCast boot.
-        if self._studio_ok:
+        # Ollama-specific (preloads a local model into VRAM) — meaningless for a
+        # cloud provider, so only run it when Studio is actually the local Ollama path.
+        if self._studio_ok and not (_PRIMARY_AI_PROFILE and _HAS_UNIVERSAL_AI):
             asyncio.create_task(self._warm_studio())
 
     async def _warm_studio(self) -> None:
@@ -518,6 +574,11 @@ class LLMOrchestrator:
         messages.extend(ctx.history_as_messages())
         messages.append({"role": "user", "content": prompt})
 
+        if _PRIMARY_AI_PROFILE and _HAS_UNIVERSAL_AI:
+            return await self._studio_universal(
+                prompt, sys_prompt, ctx, temperature, max_tokens, t0=t0,
+            )
+
         try:
             async with httpx.AsyncClient(timeout=float(os.getenv("OLLAMA_TIMEOUT", "180"))) as c:
                 r = await c.post(
@@ -550,6 +611,86 @@ class LLMOrchestrator:
                 role_requested="studio",
                 mind_used="studio",
                 model=model_name,
+                latency_ms=round((time.monotonic() - t0) * 1000, 1),
+                error=err,
+            )
+
+    # ── Universal Studio path — any backend in ai_providers.PROVIDER_REGISTRY —
+
+    async def _studio_universal(
+        self,
+        prompt: str,
+        sys_prompt: str,
+        ctx: ContextPacket,
+        temperature: float,
+        max_tokens: int,
+        *,
+        t0: float,
+    ) -> OrchestratorResult:
+        """
+        Answer a Studio request through the profile named by
+        PUBCAST_PRIMARY_AI_PROFILE, via the universal provider registry in
+        ai_providers.py — the same registry that already serves PubPartner.
+
+        GenerateRequest carries a single system string plus a single prompt
+        string (no multi-turn messages array), so room history is folded into
+        the prompt text here rather than dropped, to match what the hardcoded
+        Ollama path above sends via ctx.history_as_messages().
+        """
+        model_label = f"profile:{_PRIMARY_AI_PROFILE}"
+        try:
+            config = load_ai_runtime_config()
+            profile = config.profiles.get(_PRIMARY_AI_PROFILE)
+            if profile is None:
+                raise AIRuntimeConfigError(
+                    f"PUBCAST_PRIMARY_AI_PROFILE='{_PRIMARY_AI_PROFILE}' is not defined "
+                    f"in {config.config_path}."
+                )
+            if not profile.enabled:
+                raise AIRuntimeConfigError(f"AI profile '{profile.name}' is disabled.")
+
+            history_lines = [
+                f"{m.get('role', 'user')}: {m.get('content', '')}"
+                for m in ctx.history_as_messages()
+                if m.get("content")
+            ]
+            full_prompt = "\n".join(history_lines + [f"user: {prompt}"]) if history_lines else prompt
+
+            result = await generate_with_profile(
+                config, profile, full_prompt, system=sys_prompt,
+                overrides={"temperature": temperature, "max_tokens": max_tokens},
+            )
+            return OrchestratorResult(
+                text=result.text,
+                role_used="studio",
+                role_requested="studio",
+                mind_used="studio",
+                model=f"{profile.backend}:{result.model}",
+                latency_ms=round((time.monotonic() - t0) * 1000, 1),
+            )
+        except (AIProviderError, AIRuntimeConfigError) as exc:
+            err = str(exc)
+            self._last_error = err
+            logger.warning("Orchestrator: universal Studio (%s) error: %s", _PRIMARY_AI_PROFILE, err)
+            return OrchestratorResult(
+                text="",
+                role_used="studio",
+                role_requested="studio",
+                mind_used="studio",
+                model=model_label,
+                latency_ms=round((time.monotonic() - t0) * 1000, 1),
+                error=err,
+            )
+        except Exception as exc:  # noqa: BLE001 — Studio must never raise into the caller
+            err = str(exc)
+            self._last_error = err
+            logger.warning("Orchestrator: universal Studio (%s) unexpected error: %s", _PRIMARY_AI_PROFILE, err)
+            return OrchestratorResult(
+                text="",
+                role_used="studio",
+                role_requested="studio",
+                mind_used="studio",
+                model=model_label,
                 latency_ms=round((time.monotonic() - t0) * 1000, 1),
                 error=err,
             )
