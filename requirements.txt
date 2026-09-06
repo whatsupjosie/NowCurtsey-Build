@@ -1,0 +1,55 @@
+# PubCast AI v5.0 — Base Dependencies
+# Install: pip install -r requirements.txt
+#
+# For Architect (local GGUF inference), also run:
+#   pip install -r requirements-architect.txt
+#
+# For cloud LLM providers (OpenAI, Gemini), uncomment the relevant lines below.
+
+# ── Core framework ──────────────────────────────────────────────────────────────
+fastapi>=0.109.0,<1.0
+uvicorn[standard]>=0.27.0,<1.0
+starlette>=0.35.0,<1.0
+pydantic>=2.0,<3.0
+
+# ── HTTP client (Ollama, external APIs) ─────────────────────────────────────────
+httpx>=0.27.0,<1.0
+
+# ── HTML templating (Jinja2Templates) ────────────────────────────────────────────
+jinja2>=3.1.0,<4.0
+
+# ── Form/multipart parsing ──────────────────────────────────────────────────────
+python-multipart>=0.0.7
+
+# ── Database ────────────────────────────────────────────────────────────────────
+aiosqlite>=0.19.0
+
+# ── Numeric (mocap retargeting/quaternion math, EVO Protocol) ───────────────────
+numpy>=1.26.0,<3.0
+
+# ── File type detection (stdlib fallback — no platform-specific binary needed) ──
+# python-magic is NOT used. File type detection uses mimetypes (stdlib) + extension
+# mapping with a safe unknown fallback. Zero external dependency.
+
+# ── Cloud LLM providers (install as needed) ─────────────────────────────────────
+# openai>=1.12.0          # Uncomment for OpenAI bots
+# google-generativeai     # Uncomment for Gemini bots
+# anthropic>=0.20.0       # Uncomment for Claude bots
+
+# ── Standalone Iteration Wallet (optional, independent of main app) ──────────────
+# flask>=3.0
+# flask-cors>=4.0
+python-jose[cryptography]>=3.3.0
+# passlib 1.7.4 (the latest released version — passlib has had no release
+# since 2020) reads bcrypt.__about__.__version__ and expects bcrypt's own
+# internal self-test (detect_wrap_bug) to tolerate a >72-byte probe string.
+# bcrypt 4.0+ removed __about__ and started raising ValueError on >72-byte
+# input instead of the old silent-truncate behavior, breaking passlib's
+# backend init outright. Confirmed directly in this environment: bcrypt 5.0.0
+# fails tests/test_three_solution_rounds_auth_foundation.py::test_auth_login_verifies_password_and_role
+# with `ValueError: password cannot be longer than 72 bytes` raised from
+# inside passlib's own self-test; bcrypt 3.2.2 does not hit this path and the
+# same test passes, full suite re-run showed no other change. Pin below the
+# breaking major version until passlib ships a compatible release.
+passlib[bcrypt]>=1.7.4
+bcrypt<4.0.0
