@@ -124,6 +124,11 @@ export default function PubWorld() {
   const [sets,       setSets]       = useState([]);
   const [status,     setStatus]     = useState("PUB WORLD INITIALIZED · VOID READY · START BUILDING YOUR SET");
   const [recState,   setRecState]   = useState("idle"); // idle | recording | paused
+  const [povOn,      setPovOn]      = useState(false);  // render from placed camera
+  const [lastClip,   setLastClip]   = useState(null);   // { url, name, size, mime }
+  const povRef       = useRef(null);   // THREE.PerspectiveCamera (child of vcam)
+  const povOnRef     = useRef(false);  // read inside animate() without stale closure
+  const recRef       = useRef(null);   // { recorder, chunks, stream, sessionId }
 
   useEffect(() => { modeRef.current = mode; }, [mode]);
   useEffect(() => { palRef.current  = pal;  }, [pal]);
@@ -229,6 +234,15 @@ export default function PubWorld() {
     vcam.rotation.y = -Math.PI * 0.73;
     scene.add(vcam);
 
+    // Real camera at the lens. Parented to vcam, so it inherits position and
+    // rotation automatically — drag the camera prop, the shot follows.
+    // Default orientation is correct: Three.js cameras look down local -Z,
+    // which is the direction mkVirtualCamera() points the barrel and frustum.
+    const povCam = new THREE.PerspectiveCamera(50, W / H, 0.1, 1000);
+    povCam.position.set(0, 0, -1.56);   // at the glass, not inside the body
+    vcam.add(povCam);
+    povRef.current = povCam;
+
     const actor = mkActor();
     scene.add(actor);
 
@@ -244,7 +258,7 @@ export default function PubWorld() {
     const bakedList = [];
     const rc = new THREE.Raycaster();
 
-    engRef.current = { scene, cam, renderer, orbit, rc, voxMap, bakedList, vcam, actor, ghost, castPlanes };
+    engRef.current = { scene, cam, renderer, orbit, rc, voxMap, bakedList, vcam, povCam, actor, ghost, castPlanes };
 
     // ── Helpers ────────────────────────────────────────────────────────────────
     const vKey = (x, y, z) => `${Math.round(x * 2)},${Math.round(y * 2)},${Math.round(z * 2)}`;
@@ -395,13 +409,23 @@ export default function PubWorld() {
       if (ghost.visible) {
         ghost.material.opacity = 0.15 + Math.sin(t * 6) * 0.08;
       }
-      renderer.render(scene, cam);
+      if (povOnRef.current && povRef.current) {
+        // Hide the camera body so we don't film the inside of our own prop.
+        // updateMatrixWorld() ignores .visible, so povCam's transform stays valid.
+        vcam.updateMatrixWorld(true);
+        vcam.visible = false;
+        renderer.render(scene, povRef.current);
+        vcam.visible = true;
+      } else {
+        renderer.render(scene, cam);
+      }
     };
     animate();
 
     const onResize = () => {
       W = el.clientWidth; H = el.clientHeight;
       cam.aspect = W / H; cam.updateProjectionMatrix();
+      if (povRef.current) { povRef.current.aspect = W / H; povRef.current.updateProjectionMatrix(); }
       renderer.setSize(W, H);
     };
     window.addEventListener("resize", onResize);
@@ -487,6 +511,122 @@ export default function PubWorld() {
     sceneRow: { display:"flex", alignItems:"center", gap:6, padding:"5px 7px", background:"#07001a", border:"1px solid #140030", marginBottom:2 },
   };
 
+  // ── POV toggle ───────────────────────────────────────────────────────────────
+  const togglePov = () => {
+    const next = !povOnRef.current;
+    povOnRef.current = next;
+    setPovOn(next);
+    setStatus(next ? "CAMERA POV · RECORDING WHAT THE LENS SEES"
+                   : "FREE LOOK · ORBIT CAMERA");
+  };
+
+  // ── Real recording via MediaRecorder on the WebGL canvas ─────────────────────
+  const startRec = async () => {
+    const eng = engRef.current;
+    if (!eng) return;
+    if (typeof MediaRecorder === "undefined") {
+      setStatus("ERROR · MediaRecorder UNSUPPORTED IN THIS BROWSER");
+      return;
+    }
+
+    // Pick the best container this browser actually supports, in quality order.
+    const mime = ["video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm", "video/mp4"]
+      .find(m => MediaRecorder.isTypeSupported(m));
+    if (!mime) {
+      setStatus("ERROR · NO SUPPORTED VIDEO CODEC");
+      return;
+    }
+
+    try {
+      // captureStream() taps the live WebGL framebuffer directly — no screen
+      // capture, no browser chrome, no cursor. Whatever camera is rendering
+      // is exactly what gets recorded.
+      const stream = eng.renderer.domElement.captureStream(30);
+      const recorder = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 8_000_000 });
+      const chunks = [];
+
+      recorder.ondataavailable = e => { if (e.data && e.data.size > 0) chunks.push(e.data); };
+
+      recorder.onerror = e => {
+        setRecState("idle");
+        setStatus(`RECORDER ERROR · ${e?.error?.name || "UNKNOWN"}`);
+      };
+
+      recorder.onstop = async () => {
+        const blob = new Blob(chunks, { type: mime });
+        const ext  = mime.includes("mp4") ? "mp4" : "webm";
+        const name = `pubcast_${recRef.current?.sessionId || Date.now()}.${ext}`;
+        const url  = URL.createObjectURL(blob);
+
+        if (lastClip?.url) URL.revokeObjectURL(lastClip.url); // don't leak old blobs
+        setLastClip({ url, name, size: blob.size, mime });
+        setStatus(`CLIP READY · ${(blob.size / 1048576).toFixed(2)} MB · ${name}`);
+
+        stream.getTracks().forEach(t => t.stop());
+
+        // Two separate calls, because they are two different routes.
+        // VERIFIED: /broadcast/stop takes NO arguments and CANNOT accept a
+        // file. The upload goes to the new /clip/upload route instead.
+        try {
+          await fetch("/api/vision/broadcast/stop", { method: "POST" });
+        } catch { /* non-fatal */ }
+
+        // Hand the real file to the real pipeline:
+        // register_artifact() -> ffmpeg transcode -> export_session()
+        try {
+          const fd = new FormData();
+          fd.append("file", blob, name);
+          fd.append("session_id", recRef.current?.sessionId || "");
+          const res = await fetch("/api/vision/clip/upload", { method: "POST", body: fd });
+          if (res.ok) {
+            const j = await res.json();
+            setStatus(`CLIP REGISTERED · ${(blob.size / 1048576).toFixed(2)} MB · ${j.path || name}`);
+          } else {
+            const j = await res.json().catch(() => ({}));
+            setStatus(`CLIP SAVED LOCALLY · SERVER SAID: ${j.detail || res.status}`);
+          }
+        } catch {
+          // The local clip is already safe in setLastClip — say so rather than
+          // implying the recording was lost.
+          setStatus(s => s + " · BACKEND UNREACHABLE, CLIP SAVED LOCALLY");
+        }
+      };
+
+      const sessionId = `sess_${Date.now()}`;
+      try {
+        // VERIFIED signature: BroadcastStartRequest has exactly one field,
+        // `quality` (LOW | MEDIUM | HIGH | ULTRA). It does NOT take a
+        // session_id or source — sending those would be silently ignored.
+        await fetch("/api/vision/broadcast/start", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ quality: "HIGH" }),
+        });
+      } catch { /* recording locally is still valid if the backend is down */ }
+
+      recRef.current = { recorder, chunks, stream, sessionId };
+      recorder.start(1000);   // emit a chunk per second so a crash loses ≤1s
+      setRecState("recording");
+      setStatus(povOnRef.current ? "● RECORDING · CAMERA POV" : "● RECORDING · FREE LOOK");
+    } catch (err) {
+      setRecState("idle");
+      setStatus(`CAPTURE FAILED · ${err.message}`);
+    }
+  };
+
+  const pauseRec = () => {
+    const r = recRef.current?.recorder;
+    if (!r) return;
+    if (r.state === "recording") { r.pause();  setRecState("paused");    setStatus("‖ PAUSED"); }
+    else if (r.state === "paused") { r.resume(); setRecState("recording"); setStatus("● RECORDING"); }
+  };
+
+  const stopRec = () => {
+    const r = recRef.current?.recorder;
+    if (r && r.state !== "inactive") r.stop();   // onstop builds the file
+    setRecState("idle");
+  };
+
   return (
     <div style={S.root}>
       {/* ── Top bar ── */}
@@ -569,20 +709,34 @@ export default function PubWorld() {
               Performance Capture<br/>
               Object Tracking
             </div>
+
+            <button onClick={togglePov}
+              style={{ ...S.btn(povOn ? "#44cc88" : "#4466ff"), marginBottom:6 }}>
+              {povOn ? "◉  CAMERA POV — LIVE" : "○  SWITCH TO CAMERA POV"}
+            </button>
+
             {["▶  RECORD","⏸  PAUSE","⏹  STOP","⊕  ADD MARKER"].map((l, i) => (
-              <button key={l} onClick={() => {
-                if (i === 0) setRecState("recording");
-                if (i === 1) setRecState("paused");
-                if (i === 2) { setRecState("idle"); setStatus("CAPTURE SESSION ENDED"); }
-              }} style={{ ...S.btn(i===0?"#ff4444":i===3?"#44cc88":"#aa55ff"), marginBottom:2 }}>{l}</button>
+              <button key={l}
+                disabled={(i === 0 && recState !== "idle") || (i > 0 && i < 3 && recState === "idle")}
+                onClick={() => {
+                  if (i === 0) startRec();
+                  if (i === 1) pauseRec();
+                  if (i === 2) stopRec();
+                  if (i === 3) setStatus(`⊕ MARKER @ ${new Date().toLocaleTimeString()}`);
+                }}
+                style={{ ...S.btn(i===0?"#ff4444":i===3?"#44cc88":"#aa55ff"),
+                         marginBottom:2,
+                         opacity: ((i === 0 && recState !== "idle") || (i > 0 && i < 3 && recState === "idle")) ? 0.4 : 1 }}>
+                {l}
+              </button>
             ))}
-            {recState !== "idle" && (
-              <div style={{ display:"flex", gap:5, alignItems:"center", marginTop:6 }}>
-                <div style={{ width:7, height:7, borderRadius:"50%", background: recState === "recording" ? "#ff0000":"#ffaa00", boxShadow:`0 0 6px ${recState==="recording"?"#ff0000":"#ffaa00"}` }} />
-                <span style={{ fontSize:9, color: recState==="recording"?"#ff5555":"#ffaa44", letterSpacing:1 }}>
-                  {recState === "recording" ? "RECORDING" : "PAUSED"}
-                </span>
-              </div>
+
+            {lastClip && (
+              <a href={lastClip.url} download={lastClip.name}
+                 style={{ ...S.btn("#44cc88"), marginTop:6, display:"block",
+                          textAlign:"center", textDecoration:"none" }}>
+                ⬇  DOWNLOAD CLIP ({(lastClip.size / 1048576).toFixed(1)} MB)
+              </a>
             )}
           </>}
 
