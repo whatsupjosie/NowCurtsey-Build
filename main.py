@@ -35,6 +35,7 @@ import asyncio
 import json
 import logging
 import os
+import sys
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -1030,12 +1031,20 @@ async def lifespan(application: FastAPI):
     # init_peq() must be called before create_peq_router() so the broker
     # is initialised and PEQSystem is loaded. Without this call, every
     # request returns degraded signals silently.
-    # peq_package_path points to modules/peq/ so the broker can add it
-    # to sys.path and do 'from peq.system import PEQSystem' correctly.
-    # cre_eq/ must be at repo root (beside modules/) for the same reason.
+    # peq_package_path must point to modules/ (the PARENT of peq/), not
+    # modules/peq/ itself — 'from peq.system import PEQSystem' resolves
+    # peq as a package on sys.path, so sys.path needs modules/, the
+    # directory peq/ lives inside, not peq/ itself.
+    # cre_eq/ must be at repo root (beside modules/) for the same reason;
+    # repo root is added here too since peq/state.py and peq/system.py
+    # both do 'from cre_eq...' and repo root isn't guaranteed to already
+    # be on sys.path depending on how the server was launched.
     if _HAS_PEQ and create_peq_router is not None and init_peq is not None:
         try:
-            peq_path = str(Path(__file__).resolve().parent / "modules" / "peq")
+            repo_root = str(Path(__file__).resolve().parent)
+            if repo_root not in sys.path:
+                sys.path.insert(0, repo_root)
+            peq_path = str(Path(__file__).resolve().parent / "modules")
             peq_loaded = init_peq(peq_package_path=peq_path)
             application.include_router(create_peq_router())
             logger.info("[6f] PEQ system ready — /api/peq/* (full=%s)", peq_loaded)
