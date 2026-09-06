@@ -79,16 +79,28 @@ async def _dispatch_event(event_type: EventType, params: dict):
         except Exception as e:
             logger.error(f"Handler error for {event_type.value}: {e}")
 
-# Wire player to dispatcher
-player.register_handler(EventType.CAMERA, lambda p: _dispatch_event(EventType.CAMERA, p))
-player.register_handler(EventType.LIGHTING, lambda p: _dispatch_event(EventType.LIGHTING, p))
-player.register_handler(EventType.CHAT, lambda p: _dispatch_event(EventType.CHAT, p))
-player.register_handler(EventType.RECORD, lambda p: _dispatch_event(EventType.RECORD, p))
-player.register_handler(EventType.ENTRANCE, lambda p: _dispatch_event(EventType.ENTRANCE, p))
-player.register_handler(EventType.ENVIRONMENT, lambda p: _dispatch_event(EventType.ENVIRONMENT, p))
-player.register_handler(EventType.WALK, lambda p: _dispatch_event(EventType.WALK, p))
-player.register_handler(EventType.AUDIO, lambda p: _dispatch_event(EventType.AUDIO, p))
-player.register_handler(EventType.CUSTOM, lambda p: _dispatch_event(EventType.CUSTOM, p))
+# Wire player to dispatcher.
+#
+# TimelinePlayer._fire() only awaits a handler when
+# asyncio.iscoroutinefunction(handler) is True. A lambda that returns a
+# coroutine (e.g. `lambda p: _dispatch_event(EventType.CAMERA, p)`) is itself
+# a plain function, not a coroutine function, so _fire() called it
+# synchronously — creating the _dispatch_event(...) coroutine and then
+# discarding it unawaited. None of the registered camera/lighting/chat/
+# recording/etc. automation ever actually ran. Using a real `async def`
+# closure per event type makes iscoroutinefunction() True, so _fire() awaits
+# it correctly.
+def _make_dispatcher(event_type: EventType):
+    async def _dispatch(params: dict) -> None:
+        await _dispatch_event(event_type, params)
+    return _dispatch
+
+for _et in (
+    EventType.CAMERA, EventType.LIGHTING, EventType.CHAT, EventType.RECORD,
+    EventType.ENTRANCE, EventType.ENVIRONMENT, EventType.WALK, EventType.AUDIO,
+    EventType.CUSTOM,
+):
+    player.register_handler(_et, _make_dispatcher(_et))
 
 # ═══════════════════════════════════════════════════════════════════════════
 # API ROUTES
@@ -164,10 +176,17 @@ async def load_timeline(req: TimelineLoadRequest, identity: Dict[str, Any] = Dep
 @router.post("/play")
 async def play(identity: Dict[str, Any] = Depends(require_role("mod"))):
     """Start timeline playback."""
-    if player.state == TimelineState.IDLE:
+    # load_timeline() intentionally leaves a successfully loaded player in
+    # IDLE (see TimelinePlayer.load_timeline), so checking state==IDLE here
+    # rejected every loaded timeline as though none were loaded. "No timeline
+    # loaded" actually means player._timeline is None. TimelinePlayer also
+    # exposes async start(), not a sync play() — this now calls that.
+    if player._timeline is None:
         raise HTTPException(400, "No timeline loaded")
-    
-    player.play()
+
+    ok = await player.start()
+    if not ok:
+        raise HTTPException(400, "Cannot start (already running)")
     logger.info("Timeline playback started")
     return {"action": "playing", "state": player.state.value}
 
@@ -176,8 +195,8 @@ async def pause(identity: Dict[str, Any] = Depends(require_role("mod"))):
     """Pause timeline playback."""
     if player.state != TimelineState.RUNNING:
         raise HTTPException(400, "Timeline not running")
-    
-    player.pause()
+
+    await player.pause()
     logger.info("Timeline playback paused")
     return {"action": "paused", "elapsed": player.elapsed}
 
@@ -186,15 +205,15 @@ async def resume(identity: Dict[str, Any] = Depends(require_role("mod"))):
     """Resume paused timeline."""
     if player.state != TimelineState.PAUSED:
         raise HTTPException(400, "Timeline not paused")
-    
-    player.resume()
+
+    await player.resume()
     logger.info("Timeline playback resumed")
     return {"action": "resumed", "state": player.state.value}
 
 @router.post("/stop")
 async def stop(identity: Dict[str, Any] = Depends(require_role("mod"))):
     """Stop timeline playback."""
-    player.stop()
+    await player.stop()
     logger.info("Timeline playback stopped")
     return {"action": "stopped"}
 

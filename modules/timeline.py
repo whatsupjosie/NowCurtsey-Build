@@ -94,6 +94,23 @@ class TimelinePlayer:
         if self._state==TimelineState.RUNNING: self._state=TimelineState.PAUSED; self._pause_time=time.time()
     async def resume(self):
         if self._state==TimelineState.PAUSED: self._pause_offset+=time.time()-self._pause_time; self._state=TimelineState.RUNNING
+    def seek(self, t: float) -> None:
+        """Jump playback to time `t`. Events before `t` are marked fired (skipped, not
+        re-triggered); events at/after `t` are cleared so they fire normally as playback
+        reaches them again."""
+        if not self._timeline: return
+        t = max(0.0, min(t, self._timeline.duration))
+        now = time.time()
+        if self._state == TimelineState.RUNNING:
+            self._pause_offset = now - self._start_time - t
+        elif self._state == TimelineState.PAUSED:
+            self._pause_offset = self._pause_time - self._start_time - t
+        else:
+            self._start_time = now; self._pause_time = now; self._pause_offset = -t
+        for ev in self._timeline.events:
+            ev.fired = ev.t < t
+            ev.fired_at = ev.t if ev.fired else None
+            ev.error = None
     def status(self):
         return {"state":self._state.value,"timeline":self._timeline.name if self._timeline else None,
                 "elapsed":round(self.elapsed,2),"progress":round(self.progress,3),

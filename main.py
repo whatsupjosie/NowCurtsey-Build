@@ -216,11 +216,13 @@ except ImportError:
     create_media_intake_router = None
 
 try:
-    from modules.peq_integration import create_peq_router, init_peq
+    from modules.peq_integration import create_peq_router, init_peq, make_chat_observer, attach_hub_push
     _HAS_PEQ = True
 except ImportError:
     create_peq_router = None
     init_peq = None
+    make_chat_observer = None
+    attach_hub_push = None
 
 try:
     from modules.theater_render_pipeline.greedy_mesh import generate_greedy_mesh, hollow_out
@@ -1047,6 +1049,18 @@ async def lifespan(application: FastAPI):
             peq_path = str(Path(__file__).resolve().parent / "modules")
             peq_loaded = init_peq(peq_package_path=peq_path)
             application.include_router(create_peq_router())
+            # Without this, hub.on_chat_callback stays bot_manager.on_chat_message
+            # (set earlier at boot) and PEQ never sees a single observation from
+            # real chat traffic — its cache and subscriber broadcasts would stay
+            # empty forever unless something calls POST /api/peq/observe by hand.
+            # make_chat_observer wraps the existing callback (still calls it first,
+            # unchanged) and submits the same message to PEQ in the background;
+            # attach_hub_push broadcasts resulting PEQSignals back out over the hub
+            # so subscribed avatars/characters actually receive them.
+            if hub is not None and hasattr(hub, "on_chat_callback") and make_chat_observer is not None:
+                hub.on_chat_callback = make_chat_observer(hub.on_chat_callback)
+            if hub is not None and attach_hub_push is not None:
+                attach_hub_push(hub)
             logger.info("[6f] PEQ system ready — /api/peq/* (full=%s)", peq_loaded)
         except Exception as exc:
             logger.warning("[6f] PEQ system failed: %s", exc)
@@ -1875,7 +1889,11 @@ async def update_production_state(request: Request, identity: Dict[str, Any] = D
 async def get_user_state(request: Request, identity: Dict[str, Any] = Depends(current_identity)):
     """Return persisted display name / avatar colour for the requesting client."""
     client_id = bound_actor(request=request, identity=identity, explicit_value=request.headers.get("X-Client-Id"), field_name="X-Client-Id", allow_privileged_override=False)
-    user_file  = DATA_DIR / "users" / f"{client_id}.json"
+    # bound_actor() only checks that this ID is consistent with the caller's
+    # identity — it never restricts its characters. Under relaxed auth an
+    # unauthenticated caller sets X-Client-Id directly, so an unsanitized ID
+    # (e.g. "../../../tmp/owned") would let this path escape DATA_DIR/users.
+    user_file  = DATA_DIR / "users" / f"{sanitize_filename(client_id)}.json"
     if user_file.exists():
         try:
             payload = read_json(user_file)
@@ -1899,7 +1917,7 @@ async def set_user_state(request: Request, identity: Dict[str, Any] = Depends(cu
     """Persist display name / avatar colour for the requesting client."""
     body       = await _json_dict(request)
     client_id  = bound_actor(request=request, identity=identity, explicit_value=request.headers.get("X-Client-Id"), field_name="X-Client-Id", allow_privileged_override=False)
-    user_file  = DATA_DIR / "users" / f"{client_id}.json"
+    user_file  = DATA_DIR / "users" / f"{sanitize_filename(client_id)}.json"
     existing = read_json(user_file) if user_file.exists() else {}
     payload = dict(existing)
     payload.update({
@@ -3405,7 +3423,7 @@ async def register_session_user(request: Request, identity: Dict[str, Any] = Dep
     if raw_host_user_id:
         # Host assignment may not contradict the caller unless a privileged token is present.
         host_user_id = bound_actor(request=request, identity=identity, explicit_value=raw_host_user_id, field_name='host_user_id')
-    stored_user_state = read_json(DATA_DIR / "users" / f"{user_id}.json")
+    stored_user_state = read_json(DATA_DIR / "users" / f"{sanitize_filename(user_id)}.json")
     care_profile = None
     if alex_little_one_enabled():
         from modules.alex_little_one.care_profile import normalize_care_profile
@@ -3523,7 +3541,7 @@ if alex_little_one_enabled():
             )
         except KeyError as exc:
             raise HTTPException(404, str(exc))
-        user_file = DATA_DIR / "users" / f"{user_id}.json"
+        user_file = DATA_DIR / "users" / f"{sanitize_filename(user_id)}.json"
         user_state = read_json(user_file) if user_file.exists() else {"user_id": user_id}
         user_state["care_profile"] = result["care_profile"]
         write_json(user_file, user_state)
