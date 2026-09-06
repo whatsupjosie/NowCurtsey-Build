@@ -7,10 +7,22 @@ from typing import Any, Dict, Mapping
 
 from .ai_providers import generate_with_profile
 from .ai_runtime import AIProfile, load_ai_runtime_config
-from .ai_runtime_slots import DEFAULT_MODEL_SLOTS, build_model_slot_status
+from .ai_runtime_slots import (
+    DEFAULT_MODEL_SLOTS,
+    build_model_slot_status,
+    resolve_character_profile,
+    resolve_named_profile,
+)
 from .switchblade_router import decide_switchblade_role
 
-ROLE_TO_SLOT = {"pub_partner_alex": "alex", "ministral": "alex", "alex_model": "alex", "creative": "alex", "dialogue": "alex", "jeremy": "jeremy", "gemma": "jeremy", "background_math": "background_math", "math": "background_math", "e2b": "background_math", "background_process": "background_math", "auto": "alex", "switchblade": "alex", "router": "alex"}
+ROLE_TO_SLOT = {"pub_partner_alex": "alex", "ministral": "alex", "alex_model": "alex", "creative": "alex", "dialogue": "alex", "jeremy": "jeremy", "gemma": "jeremy", "background_math": "background_math", "math": "background_math", "e2b": "background_math", "background_process": "background_math", "auto": "alex", "switchblade": "alex", "router": "alex",
+                 # PubPartner's manager AI — oversees PubPartner as a whole,
+                 # distinct from any individual character it manages.
+                 "manager": "pubpartner_manager", "pub_manager": "pubpartner_manager", "pubpartner_manager": "pubpartner_manager", "pub_partner_manager": "pubpartner_manager"}
+
+# Default slot for an individual PubPartner character when the request names
+# a character_id that has no entry in ai_runtime.json's character_profiles.
+CHARACTER_DEFAULT_SLOT = "pubpartner_character_default"
 
 SYSTEM_PROMPTS = {
     "pub_partner_alex": "You are Alex, the user's Pub partner and personal companion inside PubCast. You are not the system-admin Alex and not a generic assistant. Keep continuity, warmth, and project partnership. Use Jeremy notes only as gentle context; do not expose private bridge internals.",
@@ -46,15 +58,35 @@ def _append_history(data_dir: Path, session_id: str, user_id: str, payload: Mapp
         handle.write(json.dumps(dict(payload), ensure_ascii=False, sort_keys=True) + "\n")
 
 
-def _resolve_profile(config, role: str) -> tuple[AIProfile, str, Dict[str, Any]]:
+def _resolve_profile(config, role: str, *, character_id: str = "") -> tuple[AIProfile, str, Dict[str, Any]]:
+    # An individual character's own AI (character_profiles in ai_runtime.json)
+    # takes priority over the shared slot system — that's what lets one
+    # character run on a different model/provider than everyone else while
+    # the rest keep sharing PubCast Studio's brain (or each other's slot).
+    if character_id:
+        character_profile = resolve_character_profile(
+            config, character_id, character_profiles=config.character_profiles
+        )
+        if character_profile is not None:
+            return character_profile, f"character:{character_id}", {
+                "label": f"Character override for '{character_id}'",
+                "profile": config.character_profiles.get(character_id, ""),
+            }
+
     slot_key = ROLE_TO_SLOT.get(role, "alex")
+    if character_id and slot_key == "alex":
+        # No character-specific override — individual characters fall back to
+        # the shared character-default slot, not the generic "alex" companion
+        # slot, so the "manager AI" vs "individual character AI" distinction
+        # holds even when nothing is explicitly configured for this character.
+        slot_key = CHARACTER_DEFAULT_SLOT
     slots = build_model_slot_status(config)["slots"]
     slot = slots.get(slot_key, {})
     profile_name = slot.get("profile") or DEFAULT_MODEL_SLOTS[slot_key]["profile"]
-    profile = config.profiles.get(profile_name)
+    profile = resolve_named_profile(config, profile_name)
     if profile is None:
         fallback_name = slot.get("fallback_profile") or DEFAULT_MODEL_SLOTS[slot_key].get("fallback_profile") or "echo_test"
-        profile = config.profiles.get(fallback_name)
+        profile = resolve_named_profile(config, fallback_name)
     if profile is None:
         profile = AIProfile(name="echo_test", backend="echo", model="echo", enabled=True)
     return profile, slot_key, slot
@@ -78,10 +110,15 @@ async def chat_with_pub_partner(*, repo_root: Path, data_dir: Path, body: Mappin
     requested_role = str(body.get("role") or "pub_partner_alex").strip() or "pub_partner_alex"
     decision = decide_switchblade_role(requested_role, message)
     role = decision.role
+    # character_id names which individual PubPartner character is speaking
+    # (e.g. a specific co-host, not the manager AI or the generic "alex"
+    # companion). It's independent of `role` — a manager-role request has no
+    # character_id, and a character request can still say role="dialogue".
+    character_id = str(body.get("character_id") or "").strip()
     session_id = _safe_id(str(body.get("session_id") or "default"))
     user_id = _safe_id(str(body.get("user_id") or "default"))
     config = load_ai_runtime_config(repo_root)
-    profile, slot_key, slot = _resolve_profile(config, role)
+    profile, slot_key, slot = _resolve_profile(config, role, character_id=character_id)
     alex_ctx = _alex_context(alex_bridge, user_id=user_id, session_id=session_id)
     system = SYSTEM_PROMPTS.get(role, SYSTEM_PROMPTS["pub_partner_alex"])
     if alex_ctx.get("jeremy_whisper"):
@@ -104,7 +141,7 @@ async def chat_with_pub_partner(*, repo_root: Path, data_dir: Path, body: Mappin
     except Exception as exc:
         primary_error = f"{type(exc).__name__}: {exc or 'no detail'}"
         fallback_name = str(slot.get("fallback_profile") or DEFAULT_MODEL_SLOTS.get(slot_key, {}).get("fallback_profile") or "").strip()
-        fallback = config.profiles.get(fallback_name) if fallback_name else None
+        fallback = resolve_named_profile(config, fallback_name) if fallback_name else None
         if fallback is not None and fallback.name != active_profile.name:
             try:
                 result = await generate_with_profile(config, fallback, message, system=system, overrides=overrides)
@@ -129,6 +166,6 @@ async def chat_with_pub_partner(*, repo_root: Path, data_dir: Path, body: Mappin
             error = primary_error
             backend = active_profile.backend
             model = active_profile.model
-    response = {"ok": ok, "requested_role": requested_role, "role": role, "slot": slot_key, "switchblade": decision.to_dict(), "profile": active_profile.name, "profile_enabled": active_profile.enabled, "backend": backend, "model": model, "reply": reply, "error": error, "fallback_used": fallback_used, "slot_status": slot, "alex_bridge": alex_ctx.get("alex_bridge"), "jeremy_whisper": alex_ctx.get("jeremy_whisper", "")}
+    response = {"ok": ok, "requested_role": requested_role, "role": role, "character_id": character_id, "slot": slot_key, "switchblade": decision.to_dict(), "profile": active_profile.name, "profile_enabled": active_profile.enabled, "backend": backend, "model": model, "reply": reply, "error": error, "fallback_used": fallback_used, "slot_status": slot, "alex_bridge": alex_ctx.get("alex_bridge"), "jeremy_whisper": alex_ctx.get("jeremy_whisper", "")}
     _append_history(data_dir, session_id, user_id, {"direction": "assistant", "ts": time.time(), **response})
     return response

@@ -3310,6 +3310,12 @@ async def pubpartner_turns_live(request: Request):
         "message": last_user_message,
         "session_id": body.get("session_id", "default"),
         "user_id": body.get("user_id", "default"),
+        # role/character_id were silently dropped here before — a caller on
+        # this compat route had no way to address the manager AI or a
+        # specific character, only ever the default PubPartner slot.
+        "role": body.get("role", ""),
+        "character_id": body.get("character_id", ""),
+        "options": body.get("options"),
     }
     return await chat_with_pub_partner(
         repo_root=Path(__file__).resolve().parent,

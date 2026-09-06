@@ -49,3 +49,50 @@ here automatically — no orchestrator changes needed for the next provider.
   existing limitation of the registry, not something this change introduces,
   but it does mean conversational nuance may read slightly differently than
   the hardcoded Ollama Studio path's native `/api/chat` messages array.
+
+## PubPartner — manager AI and individual characters, same or different
+
+PubPartner (`modules/pub_partner_chat.py`) was already wired to this same
+registry (that's how it was discovered in the first place) via named
+"slots" in `modules/ai_runtime_slots.py`, independently of the Studio
+change above. This adds the piece that was missing: making PubPartner's
+**manager AI** and each **individual character's AI** independently choose
+to share PubCast Studio's brain or run on something else entirely — the
+"optionally the same and different" requirement.
+
+### The `same_as_studio` sentinel
+
+Any slot or character profile can be set to the literal string
+`"same_as_studio"` instead of a real profile name. When resolved, it
+returns whatever AI is *currently* PubCast Studio's primary mind — the
+same `PUBCAST_PRIMARY_AI_PROFILE` profile if that's set, or the same
+hardcoded local Ollama model Studio falls back to otherwise. This is a
+live lookup, not a copy — if Studio's provider changes, anything set to
+`same_as_studio` follows automatically.
+
+### Manager AI
+
+Requests with `role: "manager"` (or `pub_manager` / `pubpartner_manager` /
+`pub_partner_manager`) resolve through the new `pubpartner_manager` slot in
+`ai_runtime_slots.DEFAULT_MODEL_SLOTS`, defaulting to `same_as_studio`.
+Override it in `config/ai_runtime.json`'s `profiles`/slot config to give
+the manager AI a different brain than Studio.
+
+### Individual characters
+
+Pass `character_id` in the chat request body (e.g.
+`{"message": "...", "character_id": "pete"}`) to address one specific
+character. Resolution order:
+
+1. `config/ai_runtime.json`'s top-level `"character_profiles"` object —
+   `{"pete": "openai_gpt4o_mini", "sir_purfluous": "same_as_studio"}` pins
+   Pete to a specific provider while Sir Purfluous explicitly shares
+   Studio's.
+2. If the character isn't listed there, falls back to the shared
+   `pubpartner_character_default` slot — `same_as_studio` by default, so
+   every character shares Studio's brain until you pin one.
+
+Verified live: a manager-role request and an unlisted character both
+resolved to Studio's current profile; a character explicitly pinned to a
+different profile came back with that profile's own model, all through
+the real `/api/pub-partner-chat/message` endpoint on the fully booted app.

@@ -56,6 +56,11 @@ class AIRuntimeConfig:
     active_profile: str
     default_options: Dict[str, Any]
     profiles: Dict[str, AIProfile]
+    # character_id -> profile name (or the "same_as_studio" sentinel from
+    # ai_runtime_slots.py). Lets each individual PubPartner character be
+    # pinned to its own AI, share PubCast Studio's, or fall back to the
+    # shared pubpartner_character_default slot when absent here.
+    character_profiles: Dict[str, str] = field(default_factory=dict)
 
     def active(self) -> AIProfile:
         try:
@@ -153,6 +158,14 @@ def _default_payload() -> Dict[str, Any]:
                 "runtime_options": {"temperature": 0.0, "max_tokens": 128},
             },
         },
+        # character_id -> profile name, for PubPartner's individual characters.
+        # A value of "same_as_studio" (the default for characters not listed
+        # here — see ai_runtime_slots.DEFAULT_MODEL_SLOTS) shares whatever AI
+        # is currently PubCast's primary Studio mind. Any other value here
+        # pins that one character to a specific profile independently of
+        # Studio and of every other character. Empty by default — nobody is
+        # pinned, everybody shares Studio's brain unless listed here.
+        "character_profiles": {},
     }
 
 
@@ -217,11 +230,17 @@ def load_ai_runtime_config(base_dir: Optional[Path] = None) -> AIRuntimeConfig:
         str(name): AIProfile.from_dict(str(name), profile_payload or {})
         for name, profile_payload in profiles_payload.items()
     }
+    character_profiles_payload = payload.get("character_profiles") or {}
+    if not isinstance(character_profiles_payload, Mapping):
+        raise AIRuntimeConfigError(
+            f"'character_profiles' in {config_path} must be an object keyed by character_id."
+        )
     return AIRuntimeConfig(
         config_path=config_path,
         active_profile=str(payload.get("active_profile") or "").strip(),
         default_options=dict(payload.get("default_options", {}) or {}),
         profiles=profiles,
+        character_profiles={str(k): str(v) for k, v in character_profiles_payload.items()},
     )
 
 
