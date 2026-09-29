@@ -1,0 +1,676 @@
+........................................................................ [ 12%]
+........................................................................ [ 24%]
+.......F................................................................ [ 36%]
+..FFFF.F.F.F..................................................FFFF...... [ 48%]
+...F..............................F..................................... [ 61%]
+....................F...F............................................... [ 73%]
+........F..................F............................................ [ 85%]
+......................FFF............................................... [ 97%]
+F...........                                                             [100%]
+=================================== FAILURES ===================================
+________________________ test_no_duplicate_http_routes _________________________
+
+main_module = <module 'main' from '/home/claude/INTEGRATED_BUILD/pubcast/main.py'>
+
+    def test_no_duplicate_http_routes(main_module):
+        """No *unexpected* HTTP path+method combination should be registered
+        twice — see KNOWN_HARMLESS_DUPLICATE_ROUTES above for the understood,
+        non-breaking exceptions."""
+        from starlette.routing import Route as StarletteRoute
+        seen: dict[tuple, int] = {}
+        duplicates = []
+        for path, route in _iter_effective_routes(main_module.app):
+            if not isinstance(route, StarletteRoute):
+                continue
+            for method in (route.methods or {"GET"}):
+                key = (path, method)
+                seen[key] = seen.get(key, 0) + 1
+                if seen[key] == 2 and key not in KNOWN_HARMLESS_DUPLICATE_ROUTES:
+                    duplicates.append(key)
+>       assert not duplicates, f"Duplicate HTTP route(s): {duplicates}"
+E       AssertionError: Duplicate HTTP route(s): [('/api/inference/tts', 'POST')]
+E       assert not [('/api/inference/tts', 'POST')]
+
+tests/test_02_routing.py:321: AssertionError
+____________________________ test_ws_room_connects _____________________________
+
+client = <starlette.testclient.TestClient object at 0x7fe05ed683b0>
+
+    def test_ws_room_connects(client):
+        """A client can connect to a named room via the hub."""
+        with client.websocket_connect("/ws/main") as ws:
+            # Connection accepted — hub is live
+            # Send a ping-style production_state message
+            ws.send_json({"type": "production_state", "payload": {}})
+            data = ws.receive_json()
+            # Hub should echo back a production_state event
+>           assert data.get("type") == "production_state", \
+                f"Hub returned unexpected type: {data.get('type')}"
+E           AssertionError: Hub returned unexpected type: presence
+E           assert 'presence' == 'production_state'
+E             
+E             - production_state
+E             + presence
+
+tests/test_04_websockets.py:34: AssertionError
+__________________________ test_ws_room_chat_message ___________________________
+
+client = <starlette.testclient.TestClient object at 0x7fe05ed683b0>
+
+    def test_ws_room_chat_message(client):
+        """Chat messages are broadcast and logged by the hub."""
+        with client.websocket_connect("/ws/test_room") as ws:
+            ws.send_json({
+                "type": "chat",
+                "user_id": "test_user",
+                "user": "TestUser",
+                "text": "startup test message",
+            })
+            data = ws.receive_json()
+>           assert data.get("type") == "chat"
+E           AssertionError: assert 'history' == 'chat'
+E             
+E             - chat
+E             + history
+
+tests/test_04_websockets.py:48: AssertionError
+___________________ test_ws_room_unknown_type_returns_error ____________________
+
+client = <starlette.testclient.TestClient object at 0x7fe05ed683b0>
+
+    def test_ws_room_unknown_type_returns_error(client):
+        """Unknown message types get an error response — not a crash."""
+        with client.websocket_connect("/ws/test_error") as ws:
+            ws.send_json({"type": "definitely_not_a_real_type"})
+            data = ws.receive_json()
+>           assert data.get("type") == "error"
+E           AssertionError: assert 'presence' == 'error'
+E             
+E             - error
+E             + presence
+
+tests/test_04_websockets.py:58: AssertionError
+___________________ test_ws_room_invalid_json_does_not_crash ___________________
+
+client = <starlette.testclient.TestClient object at 0x7fe05ed683b0>
+
+    def test_ws_room_invalid_json_does_not_crash(client):
+        """Malformed JSON must not crash the server."""
+        with client.websocket_connect("/ws/test_badjson") as ws:
+            ws.send_text("this is not json {{{")
+            # Server should silently ignore it (no response, no crash)
+            # Send a valid message after to confirm connection is still alive
+            ws.send_json({"type": "production_state", "payload": {}})
+            data = ws.receive_json()
+>           assert data.get("type") == "production_state"
+E           AssertionError: assert 'presence' == 'production_state'
+E             
+E             - production_state
+E             + presence
+
+tests/test_04_websockets.py:69: AssertionError
+____________________ test_ws_unity_not_treated_as_hub_room _____________________
+
+client = <starlette.testclient.TestClient object at 0x7fe05ed683b0>
+main_module = <module 'main' from '/home/claude/INTEGRATED_BUILD/pubcast/main.py'>
+
+    def test_ws_unity_not_treated_as_hub_room(client, main_module):
+        """After a /ws/unity connection, the hub should NOT have a 'unity' room entry
+        (unless someone also connected a normal chat client to /ws/unity, which we didn't).
+        If hub has a 'unity' room it means routing is broken."""
+        # Connect and immediately disconnect
+        try:
+            with client.websocket_connect("/ws/unity"):
+                pass
+        except Exception:
+            pass  # May close with 1013 — that's fine
+    
+        # The hub's rooms dict should not contain 'unity' as a result of this connection
+        hub_rooms = set(main_module.hub.rooms.keys())
+>       assert "unity" not in hub_rooms, (
+            "Hub has a 'unity' room — /ws/unity is being routed to the Hub catch-all "
+            "instead of the UnityBridge handler. Fix WebSocket route ordering in main.py."
+        )
+E       AssertionError: Hub has a 'unity' room — /ws/unity is being routed to the Hub catch-all instead of the UnityBridge handler. Fix WebSocket route ordering in main.py.
+E       assert 'unity' not in {'main', 'test_badjson', 'test_error', 'test_room', 'unity'}
+
+tests/test_04_websockets.py:124: AssertionError
+____________________ test_ws_studio_not_treated_as_hub_room ____________________
+
+client = <starlette.testclient.TestClient object at 0x7fe05ed683b0>
+main_module = <module 'main' from '/home/claude/INTEGRATED_BUILD/pubcast/main.py'>
+
+    def test_ws_studio_not_treated_as_hub_room(client, main_module):
+        """After a /ws/studio connection, the hub must not have a 'studio' room."""
+        try:
+            with client.websocket_connect("/ws/studio"):
+                pass
+        except Exception:
+            pass
+    
+        hub_rooms = set(main_module.hub.rooms.keys())
+>       assert "studio" not in hub_rooms, (
+            "Hub has a 'studio' room — /ws/studio is being routed to the Hub catch-all. "
+            "Fix WebSocket route ordering in main.py."
+        )
+E       AssertionError: Hub has a 'studio' room — /ws/studio is being routed to the Hub catch-all. Fix WebSocket route ordering in main.py.
+E       assert 'studio' not in {'main', 'studio', 'test_badjson', 'test_error', 'test_room', 'unity'}
+
+tests/test_04_websockets.py:168: AssertionError
+__________________________ test_ws_rooms_are_isolated __________________________
+
+client = <starlette.testclient.TestClient object at 0x7fe05ed683b0>
+
+    def test_ws_rooms_are_isolated(client):
+        """Messages in room A must not appear in room B."""
+        with client.websocket_connect("/ws/room_a") as ws_a:
+            with client.websocket_connect("/ws/room_b") as ws_b:
+                ws_a.send_json({
+                    "type": "chat",
+                    "user_id": "alice",
+                    "user": "Alice",
+                    "text": "secret message for room A only",
+                })
+                # ws_a should receive the echo
+                data_a = ws_a.receive_json()
+>               assert data_a.get("type") == "chat"
+E               AssertionError: assert 'history' == 'chat'
+E                 
+E                 - chat
+E                 + history
+
+tests/test_04_websockets.py:205: AssertionError
+_________________ test_reg001_ws_unity_not_shadowed_by_ws_room _________________
+
+raw_app = <fastapi.applications.FastAPI object at 0x7fe07a566990>
+
+    def test_reg001_ws_unity_not_shadowed_by_ws_room(raw_app):
+        """REG-001: /ws/unity must be registered before /ws/{room} in the route list.
+    
+        SYMPTOM: Unity Bridge WebSocket appeared to connect but silently failed —
+        Hub returned {"type":"error"} for all Unity protocol messages.
+        ROOT CAUSE: /ws/{room} registered before /ws/unity. Starlette first-match wins.
+        FIX: Moved /ws/unity and /ws/studio before /ws/{room} in main.py.
+        """
+        from starlette.routing import WebSocketRoute
+        ws_routes = [r for r in raw_app.routes if isinstance(r, WebSocketRoute)]
+        paths = [r.path for r in ws_routes]
+    
+>       assert "/ws/unity" in paths,   "REG-001: /ws/unity not registered"
+E       AssertionError: REG-001: /ws/unity not registered
+E       assert '/ws/unity' in ['/pubworld/ws/{client_id}', '/unity/ws/{client_id}', '/studio/ws', '/ws/control', '/api/logs/ws', '/ws/{room}', ...]
+
+tests/test_06_regression.py:40: AssertionError
+________________ test_reg001_ws_studio_not_shadowed_by_ws_room _________________
+
+raw_app = <fastapi.applications.FastAPI object at 0x7fe07a566990>
+
+    def test_reg001_ws_studio_not_shadowed_by_ws_room(raw_app):
+        """REG-001: /ws/studio must be registered before /ws/{room}."""
+        from starlette.routing import WebSocketRoute
+        ws_routes = [r for r in raw_app.routes if isinstance(r, WebSocketRoute)]
+        paths = [r.path for r in ws_routes]
+    
+>       assert "/ws/studio" in paths,  "REG-001: /ws/studio not registered"
+E       AssertionError: REG-001: /ws/studio not registered
+E       assert '/ws/studio' in ['/pubworld/ws/{client_id}', '/unity/ws/{client_id}', '/studio/ws', '/ws/control', '/api/logs/ws', '/ws/{room}', ...]
+
+tests/test_06_regression.py:57: AssertionError
+________________ test_reg002_lighting_apply_has_hub_null_guard _________________
+
+    def test_reg002_lighting_apply_has_hub_null_guard():
+        """REG-002: lighting_apply must check `if hub is not None` before calling
+        hub.broadcast_system_event().
+    
+        SYMPTOM: Calling /api/lighting/apply/{preset_id} during tests or before
+        lifespan completes raised AttributeError: 'NoneType' has no attribute
+        'broadcast_system_event'.
+        FIX: Added `if hub is not None:` guard around the broadcast call.
+        """
+        source = MAIN_PY.read_text(encoding="utf-8")
+>       tree = ast.parse(source)
+               ^^^^^^^^^^^^^^^^^
+
+tests/test_06_regression.py:80: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+source = '\ufeff"""\nmain.py — PubCast AI v5.5 — Production Entry Point\n======================================================...rt,\n        reload=settings.debug,\n        log_level="debug" if settings.debug else "info",\n    )\n\n\n\n\n\n\n\n\n'
+filename = '<unknown>', mode = 'exec', type_comments = False
+feature_version = -1
+
+    def parse(source, filename='<unknown>', mode='exec', *,
+              type_comments=False, feature_version=None):
+        """
+        Parse the source into an AST node.
+        Equivalent to compile(source, filename, mode, PyCF_ONLY_AST).
+        Pass type_comments=True to get back type comments where the syntax allows.
+        """
+        flags = PyCF_ONLY_AST
+        if type_comments:
+            flags |= PyCF_TYPE_COMMENTS
+        if feature_version is None:
+            feature_version = -1
+        elif isinstance(feature_version, tuple):
+            major, minor = feature_version  # Should be a 2-tuple.
+            if major != 3:
+                raise ValueError(f"Unsupported major version: {major}")
+            feature_version = minor
+        # Else it should be an int giving the minor version for 3.x.
+>       return compile(source, filename, mode, flags,
+                       _feature_version=feature_version)
+E         File "<unknown>", line 1
+E           ﻿"""
+E           ^
+E       SyntaxError: invalid non-printable character U+FEFF
+
+/usr/lib/python3.12/ast.py:52: SyntaxError
+_______________ test_reg003_chat_callback_guards_purfluous_user ________________
+
+    def test_reg003_chat_callback_guards_purfluous_user():
+        """REG-003: _chat_callback must not call bot_mgr for __purfluous__ messages.
+    
+        SYMPTOM (potential): Purfluous posts as user_id='__purfluous__'. If bot_mgr
+        responds to its own nudges, bots would loop indefinitely.
+        FIX: `if bot_mgr is not None and user_id != '__purfluous__':` guard in
+        _chat_callback.
+    
+        This test checks the source of main.py statically.
+        """
+        source = MAIN_PY.read_text(encoding="utf-8")
+        # The guard must be present somewhere near the bot_mgr.on_chat_message call
+>       assert "__purfluous__" in source, \
+            "REG-003: __purfluous__ sentinel not found in main.py"
+E       AssertionError: REG-003: __purfluous__ sentinel not found in main.py
+E       assert '__purfluous__' in '\ufeff"""\nmain.py — PubCast AI v5.5 — Production Entry Point\n======================================================...rt,\n        reload=settings.debug,\n        log_level="debug" if settings.debug else "info",\n    )\n\n\n\n\n\n\n\n\n'
+
+tests/test_06_regression.py:130: AssertionError
+_______ test_default_user_and_session_payloads_are_neutral_when_disabled _______
+
+tmp_path = PosixPath('/tmp/pytest-of-root/pytest-13/test_default_user_and_session_0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7fe05e32d5e0>
+
+    def test_default_user_and_session_payloads_are_neutral_when_disabled(tmp_path, monkeypatch):
+        monkeypatch.setattr(main, "DATA_DIR", tmp_path)
+        monkeypatch.setattr(main, "alex_bridge", None)
+        with TestClient(main.app) as client:
+            user_response = client.get("/api/state/user", headers={"X-Client-Id": "public-user"})
+            assert user_response.status_code == 200
+            _assert_no_protocol_terms(user_response.json())
+    
+            save_response = client.post(
+                "/api/state/user",
+                headers={"X-Client-Id": "public-user"},
+                json={
+                    "display_name": "Public User",
+                    "care_profile": {"mode": "youth_fountain_regression"},
+                },
+            )
+            assert save_response.status_code == 200
+            _assert_no_protocol_terms(save_response.json())
+    
+            register_response = client.post(
+                "/api/session/register",
+                json={
+                    "session_id": "public-session",
+                    "project_id": "public-project",
+                    "user_id": "public-user",
+                    "host_user_id": "public-user",
+                    "care_profile": {"public_role": "baby"},
+                },
+            )
+>           assert register_response.status_code == 200
+E           assert 403 == 200
+E            +  where 403 = <Response [403 Forbidden]>.status_code
+
+tests/test_alex_little_one_disabled.py:73: AssertionError
+____________________ test_character_profile_aliases_resolve ____________________
+
+    def test_character_profile_aliases_resolve():
+        assert get_character_profile("repete").display_name == "RePete"
+>       assert get_character_profile("purfluous").display_name == "Sir Purfluous"
+E       AssertionError: assert 'Sir. Purfluous' == 'Sir Purfluous'
+E         
+E         - Sir Purfluous
+E         + Sir. Purfluous
+E         ?    +
+
+tests/test_cast_staged_integration.py:15: AssertionError
+_________________ test_no_broken_static_api_refs_after_startup _________________
+
+    def test_no_broken_static_api_refs_after_startup():
+        static = Path('static')
+        patterns = [
+            re.compile(r'(["\'\(])(/api/[A-Za-z0-9_./?=&:-]+)'),
+            re.compile(r'(["\'\(])(/ws/[A-Za-z0-9_./?=&:-]+)'),
+        ]
+        refs: set[str] = set()
+        for path in static.rglob('*'):
+            if path.suffix.lower() not in {'.html', '.js', '.css', '.json'}:
+                continue
+            text = path.read_text('utf-8', errors='ignore')
+            for pattern in patterns:
+                for match in pattern.finditer(text):
+                    refs.add(match.group(2).split('?')[0])
+    
+        with TestClient(main.app):
+            routes = {getattr(r, 'path', None) for r in main.app.routes if getattr(r, 'path', None)}
+    
+        missing = sorted(ref for ref in refs if not _route_match(routes, ref))
+>       assert missing == []
+E       AssertionError: assert ['/api/audio/.../create', ...] == []
+E         
+E         Left contains 24 more items, first extra item: '/api/audio/devices/install-guide'
+E         Use -v to get more diff
+
+tests/test_frontend_contract_compat.py:40: AssertionError
+___ test_startup_boots_surface_voxel_and_studio_without_constructor_failures ___
+
+caplog = <_pytest.logging.LogCaptureFixture object at 0x7fe05c54a8a0>
+
+    def test_startup_boots_surface_voxel_and_studio_without_constructor_failures(caplog):
+        caplog.set_level(logging.INFO)
+        with TestClient(main.app):
+            pass
+        text = caplog.text
+        assert "[14] Surface manager failed" not in text
+        assert "[16] Voxel stack failed" not in text
+        assert "[17] Voxel bridge not connected" not in text
+        assert "[18] Studio Control failed" not in text
+>       assert "[14] Surface manager ready" in text
+E       AssertionError: assert '[14] Surface manager ready' in 'INFO     thinking_context.memory:memory.py:233 UniversalMemorySystem: restored 0 entries from snapshot (0 min old) ->...0 global entries -> data/memory_snapshot.json\nINFO     thinking_context:mount.py:247 ThinkingContext: memory saved.\n'
+
+tests/test_frontend_startup_contracts.py:15: AssertionError
+------------------------------ Captured log call -------------------------------
+INFO     thinking_context.memory:memory.py:233 UniversalMemorySystem: restored 0 entries from snapshot (0 min old) -> data/memory_snapshot.json
+INFO     thinking_context:mount.py:208 🆕 ThinkingContext: fresh session — no prior memory.
+INFO     jeremy_cricket:jeremy.py:416 🦗 Jeremy Cricket: Conversation Orchestra Conductor — ready.
+INFO     jeremy_cricket:jeremy.py:797 🦗 Jeremy registered character: bot-pete
+INFO     jeremy_cricket:jeremy.py:797 🦗 Jeremy registered character: bot-repeat
+INFO     jeremy_cricket:jeremy.py:797 🦗 Jeremy registered character: bot-sir_purfluous
+INFO     jeremy_cricket:jeremy.py:797 🦗 Jeremy registered character: bot-smoke-bot
+INFO     jeremy_cricket:jeremy.py:797 🦗 Jeremy registered character: bot-jeremy
+INFO     jeremy_cricket:jeremy.py:797 🦗 Jeremy registered character: bot-sir_purfluous_waiting_room
+INFO     jeremy_cricket:jeremy.py:799 ✅ JeremyCricket ready. 6 character(s) known.
+INFO     jeremy_cricket:jeremy.py:431 🦗 Jeremy now watching room 'studio'.
+INFO     thinking_context:mount.py:230 ThinkingContext: watching room 'studio'
+INFO     jeremy_cricket:jeremy.py:431 🦗 Jeremy now watching room 'green_room'.
+INFO     thinking_context:mount.py:230 ThinkingContext: watching room 'green_room'
+INFO     thinking_context:mount.py:232 ✅ ThinkingContext: mounted and ready.
+INFO     thinking_context:mount.py:242 ThinkingContext: shutting down Jeremy...
+INFO     jeremy_cricket:jeremy.py:446 🦗 Jeremy released room 'studio'.
+INFO     jeremy_cricket:jeremy.py:446 🦗 Jeremy released room 'green_room'.
+INFO     jeremy_cricket:jeremy.py:451 🦗 Jeremy Cricket has taken his final bow.
+INFO     thinking_context:mount.py:245 ThinkingContext: saving memory to data/memory_snapshot.json
+INFO     thinking_context.memory:memory.py:175 UniversalMemorySystem: saved 6 character(s), 0 global entries -> data/memory_snapshot.json
+INFO     thinking_context:mount.py:247 ThinkingContext: memory saved.
+_________________________________ test_bridge __________________________________
+
+    @pytest.mark.asyncio
+    async def test_bridge():
+        print("\n=== Testing Alex-Jeremy Bridge ===")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Initialize both systems
+            alex = Alex(data_dir=Path(tmpdir) / "alex")
+            await alex.init()
+    
+            keeper = CricketKeeper(data_dir=Path(tmpdir) / "jeremy")
+            await keeper.init()
+            jeremy = await keeper.get("pete")
+    
+            # Set Alex's state
+            await alex.update_emotional_state(
+                mood="fragile",
+                fragility_level=0.7,
+                care_priority="high",
+            )
+    
+            # Create bridge
+>           bridge = AlexJeremyBridge(alex=alex, jeremy=jeremy)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           TypeError: AlexJeremyBridge.__init__() got an unexpected keyword argument 'alex'
+
+tests/test_memory_systems.py:224: TypeError
+----------------------------- Captured stdout call -----------------------------
+
+=== Testing Alex-Jeremy Bridge ===
+_______ test_avatar_compatibility_shim_exists_and_points_to_avatar_glow ________
+
+    def test_avatar_compatibility_shim_exists_and_points_to_avatar_glow():
+        payload = (REPO_ROOT / 'static' / 'avatar.js').read_text(encoding='utf-8')
+>       assert 'avatar_glow.js' in payload
+E       assert 'avatar_glow.js' in '// PubCast AI — avatar.js\n// Offline compatibility shim for legacy pages that still include /static/avatar.js.\n// T...window.__pubcastAvatarModuleReason = "local Three.js/GLTFLoader bundle unavailable; no CDN fallback is used";\n})();\n'
+
+tests/test_no_user_audit.py:33: AssertionError
+_____________________ test_inference_status_exposes_config _____________________
+
+client = <starlette.testclient.TestClient object at 0x7fe05ed683b0>
+
+    def test_inference_status_exposes_config(client):
+        response = client.get("/api/inference/status")
+>       assert response.status_code == 200
+E       assert 404 == 200
+E        +  where 404 = <Response [404 Not Found]>.status_code
+
+tests/test_pubcast_smoke.py:78: AssertionError
+______________ test_inference_status_handles_invalid_config_path _______________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7fe05c383b00>
+
+    def test_inference_status_handles_invalid_config_path(monkeypatch):
+        monkeypatch.setenv("PUBCAST_AI_CONFIG_PATH", r"C:\outside\forbidden.json")
+        manager = InferenceManager.__new__(InferenceManager)
+        manager._base_dir = Path(main.__file__).resolve().parent
+        manager._worker_alive = False
+        manager._started_at = None
+        manager._last_error = ""
+        monkeypatch.delenv("PUBCAST_AI_CONFIG_PATH", raising=False)
+        manager._config = validate_ai_runtime_config(load_ai_runtime_config(manager._base_dir))
+        monkeypatch.setenv("PUBCAST_AI_CONFIG_PATH", r"C:\outside\forbidden.json")
+>       payload = InferenceManager.status(manager)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/test_pubcast_smoke.py:94: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <modules.inference.InferenceManager object at 0x7fe05c3836b0>
+
+    def status(self) -> Dict[str, Any]:
+>       s = self._orch.status()
+            ^^^^^^^^^^
+E       AttributeError: 'InferenceManager' object has no attribute '_orch'
+
+modules/inference.py:108: AttributeError
+_______________________ test_bot_crud_and_speak_endpoint _______________________
+
+client = <starlette.testclient.TestClient object at 0x7fe05ed683b0>
+
+    def test_bot_crud_and_speak_endpoint(client):
+        create_response = client.post(
+            "/api/bots",
+            json={
+                "bot_id": "smoke-bot",
+                "name": "Smoke Bot",
+                "provider": "ollama",
+                "model": "llama3",
+                "api_key_env": "PUBCAST_OLLAMA_KEY",
+                "rooms": ["control"],
+                "system_prompt": "Stay brief.",
+                "auto_reply": True,
+                "mention_only": False,
+                "shadow_presence": True,
+            },
+        )
+        assert create_response.status_code == 200
+    
+        speak_response = client.post(
+            "/api/bots/smoke-bot/speak",
+            json={"room": "control", "text": "hello from smoke bot"},
+        )
+>       assert speak_response.status_code == 200
+E       assert 404 == 200
+E        +  where 404 = <Response [404 Not Found]>.status_code
+
+tests/test_pubcast_smoke.py:122: AssertionError
+__________________ test_auth_login_verifies_password_and_role __________________
+
+auth_db = PosixPath('/tmp/pytest-of-root/pytest-13/test_auth_login_verifies_passw0')
+
+    def test_auth_login_verifies_password_and_role(auth_db):
+        import asyncio
+    
+>       asyncio.run(_seed_users())
+
+tests/test_three_solution_rounds_auth_foundation.py:133: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/usr/lib/python3.12/asyncio/runners.py:194: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+/usr/lib/python3.12/asyncio/runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/lib/python3.12/asyncio/base_events.py:687: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+tests/test_three_solution_rounds_auth_foundation.py:122: in _seed_users
+    await userdb.create_user("moddy", "secret", role="mod")
+modules/userdb.py:184: in create_user
+    return await _in_thread(_sync_create_user, username, password, role)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+modules/userdb.py:172: in _in_thread
+    return await loop.run_in_executor(None, fn, *args)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/lib/python3.12/concurrent/futures/thread.py:58: in run
+    result = self.fn(*self.args, **self.kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+modules/userdb.py:90: in _sync_create_user
+    hashed = get_password_hash(password)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+modules/auth.py:104: in get_password_hash
+    return _pwd_context.hash(plain)
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.12/dist-packages/passlib/context.py:2258: in hash
+    return record.hash(secret, **kwds)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.12/dist-packages/passlib/utils/handlers.py:779: in hash
+    self.checksum = self._calc_checksum(secret)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.12/dist-packages/passlib/handlers/bcrypt.py:591: in _calc_checksum
+    self._stub_requires_backend()
+/usr/local/lib/python3.12/dist-packages/passlib/utils/handlers.py:2254: in _stub_requires_backend
+    cls.set_backend()
+/usr/local/lib/python3.12/dist-packages/passlib/utils/handlers.py:2156: in set_backend
+    return owner.set_backend(name, dryrun=dryrun)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.12/dist-packages/passlib/utils/handlers.py:2163: in set_backend
+    return cls.set_backend(name, dryrun=dryrun)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.12/dist-packages/passlib/utils/handlers.py:2188: in set_backend
+    cls._set_backend(name, dryrun)
+/usr/local/lib/python3.12/dist-packages/passlib/utils/handlers.py:2311: in _set_backend
+    super(SubclassBackendMixin, cls)._set_backend(name, dryrun)
+/usr/local/lib/python3.12/dist-packages/passlib/utils/handlers.py:2224: in _set_backend
+    ok = loader(**kwds)
+         ^^^^^^^^^^^^^^
+/usr/local/lib/python3.12/dist-packages/passlib/handlers/bcrypt.py:626: in _load_backend_mixin
+    return mixin_cls._finalize_backend_mixin(name, dryrun)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.12/dist-packages/passlib/handlers/bcrypt.py:421: in _finalize_backend_mixin
+    if detect_wrap_bug(IDENT_2A):
+       ^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.12/dist-packages/passlib/handlers/bcrypt.py:380: in detect_wrap_bug
+    if verify(secret, bug_hash):
+       ^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.12/dist-packages/passlib/utils/handlers.py:792: in verify
+    return consteq(self._calc_checksum(secret), chk)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <passlib.handlers.bcrypt._BcryptBackend object at 0x7fe05c1e99a0>
+secret = b'01234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345...7890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234'
+
+    def _calc_checksum(self, secret):
+        # bcrypt behavior:
+        #   secret must be bytes
+        #   config must be ascii bytes
+        #   returns ascii bytes
+        secret, ident = self._prepare_digest_args(secret)
+        config = self._get_config(ident)
+        if isinstance(config, unicode):
+            config = config.encode("ascii")
+>       hash = _bcrypt.hashpw(secret, config)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       ValueError: password cannot be longer than 72 bytes, truncate manually if necessary (e.g. my_password[:72])
+
+/usr/local/lib/python3.12/dist-packages/passlib/handlers/bcrypt.py:655: ValueError
+------------------------------ Captured log call -------------------------------
+WARNING  passlib.handlers.bcrypt:bcrypt.py:622 (trapped) error reading bcrypt version
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.12/dist-packages/passlib/handlers/bcrypt.py", line 620, in _load_backend_mixin
+    version = _bcrypt.__about__.__version__
+              ^^^^^^^^^^^^^^^^^
+AttributeError: module 'bcrypt' has no attribute '__about__'
+=============================== warnings summary ===============================
+../../../../usr/local/lib/python3.12/dist-packages/passlib/utils/__init__.py:854
+  /usr/local/lib/python3.12/dist-packages/passlib/utils/__init__.py:854: DeprecationWarning: 'crypt' is deprecated and slated for removal in Python 3.13
+    from crypt import crypt as _crypt
+
+tests/test_eq_transitions.py::test_care_transitions
+  /usr/local/lib/python3.12/dist-packages/_pytest/python.py:171: PytestReturnNotNoneWarning: Test functions should return None, but tests/test_eq_transitions.py::test_care_transitions returned <class 'list'>.
+  Did you mean to use `assert` instead of `return`?
+  See https://docs.pytest.org/en/stable/how-to/assert.html#return-not-none for more information.
+    warnings.warn(
+
+tests/test_eq_transitions.py::test_memory_and_context_injection
+  /usr/local/lib/python3.12/dist-packages/_pytest/python.py:171: PytestReturnNotNoneWarning: Test functions should return None, but tests/test_eq_transitions.py::test_memory_and_context_injection returned <class 'list'>.
+  Did you mean to use `assert` instead of `return`?
+  See https://docs.pytest.org/en/stable/how-to/assert.html#return-not-none for more information.
+    warnings.warn(
+
+tests/test_eq_transitions.py::test_routing_accuracy
+  /usr/local/lib/python3.12/dist-packages/_pytest/python.py:171: PytestReturnNotNoneWarning: Test functions should return None, but tests/test_eq_transitions.py::test_routing_accuracy returned <class 'list'>.
+  Did you mean to use `assert` instead of `return`?
+  See https://docs.pytest.org/en/stable/how-to/assert.html#return-not-none for more information.
+    warnings.warn(
+
+tests/test_input_contract_guards.py::test_session_register_rejects_malformed_json
+tests/test_module_router_parity_guards.py::test_governance_rejects_malformed_json
+tests/test_module_router_parity_guards.py::test_production_switch_rejects_malformed_json
+  /usr/local/lib/python3.12/dist-packages/httpx/_models.py:408: DeprecationWarning: Use 'content=<...>' to upload raw bytes/text content.
+    headers, stream = encode_request(
+
+tests/test_memory_systems.py::test_cc_memory
+tests/test_memory_systems.py::test_cc_memory
+  /home/claude/INTEGRATED_BUILD/pubcast/modules/cc_memory_store.py:290: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = datetime.utcnow().isoformat()
+
+tests/test_memory_systems.py::test_cc_memory
+  /home/claude/INTEGRATED_BUILD/pubcast/modules/cc_memory_store.py:331: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = datetime.utcnow().isoformat()
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+SKIPPED [1] tests/alex_little_one/test_public_baby_role.py:8: Alex Little One research protocol tests require ENABLE_ALEX_LITTLE_ONE=true.
+SKIPPED [1] tests/test_public_baby_role.py:5: Moved to tests/alex_little_one/test_public_baby_role.py. Set ENABLE_ALEX_LITTLE_ONE=true to run the research protocol tests.
+FAILED tests/test_02_routing.py::test_no_duplicate_http_routes - AssertionErr...
+FAILED tests/test_04_websockets.py::test_ws_room_connects - AssertionError: H...
+FAILED tests/test_04_websockets.py::test_ws_room_chat_message - AssertionErro...
+FAILED tests/test_04_websockets.py::test_ws_room_unknown_type_returns_error
+FAILED tests/test_04_websockets.py::test_ws_room_invalid_json_does_not_crash
+FAILED tests/test_04_websockets.py::test_ws_unity_not_treated_as_hub_room - A...
+FAILED tests/test_04_websockets.py::test_ws_studio_not_treated_as_hub_room - ...
+FAILED tests/test_04_websockets.py::test_ws_rooms_are_isolated - AssertionErr...
+FAILED tests/test_06_regression.py::test_reg001_ws_unity_not_shadowed_by_ws_room
+FAILED tests/test_06_regression.py::test_reg001_ws_studio_not_shadowed_by_ws_room
+FAILED tests/test_06_regression.py::test_reg002_lighting_apply_has_hub_null_guard
+FAILED tests/test_06_regression.py::test_reg003_chat_callback_guards_purfluous_user
+FAILED tests/test_alex_little_one_disabled.py::test_default_user_and_session_payloads_are_neutral_when_disabled
+FAILED tests/test_cast_staged_integration.py::test_character_profile_aliases_resolve
+FAILED tests/test_frontend_contract_compat.py::test_no_broken_static_api_refs_after_startup
+FAILED tests/test_frontend_startup_contracts.py::test_startup_boots_surface_voxel_and_studio_without_constructor_failures
+FAILED tests/test_memory_systems.py::test_bridge - TypeError: AlexJeremyBridg...
+FAILED tests/test_no_user_audit.py::test_avatar_compatibility_shim_exists_and_points_to_avatar_glow
+FAILED tests/test_pubcast_smoke.py::test_inference_status_exposes_config - as...
+FAILED tests/test_pubcast_smoke.py::test_inference_status_handles_invalid_config_path
+FAILED tests/test_pubcast_smoke.py::test_bot_crud_and_speak_endpoint - assert...
+FAILED tests/test_three_solution_rounds_auth_foundation.py::test_auth_login_verifies_password_and_role
+22 failed, 566 passed, 2 skipped, 10 warnings in 32.27s
